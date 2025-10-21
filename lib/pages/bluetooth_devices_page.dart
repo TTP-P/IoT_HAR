@@ -170,6 +170,25 @@ class _BluetoothDevicesPageState extends State<BluetoothDevicesPage> {
                   ),
                 ),
               ),
+                            const SizedBox(height: 12),
+
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).pushNamedAndRemoveUntil('/root_app', (route) => false);
+                  },
+                  icon: const Icon(Icons.home),
+                  label: const Text('跳过到首页'),
+                  style: OutlinedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+              
             ],
           ),
         ),
@@ -185,4 +204,3 @@ class _BluetoothDevicesPageState extends State<BluetoothDevicesPage> {
     super.dispose();
   }
 }
-
