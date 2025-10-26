@@ -2,43 +2,15 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../services/bluetooth_service.dart';
 
-class ActivityDisplayWidget extends StatefulWidget {
-  final BluetoothService bluetoothService;
-  const ActivityDisplayWidget({Key? key, required this.bluetoothService}) : super(key: key);
 
-  @override
-  _ActivityDisplayWidgetState createState() => _ActivityDisplayWidgetState();
-}
+class ActivityDisplayWidget extends StatelessWidget {
+  final String activity;
+  final bool isConnected;
+  const ActivityDisplayWidget({Key? key, required this.activity, required this.isConnected}) : super(key: key);
 
-class _ActivityDisplayWidgetState extends State<ActivityDisplayWidget> {
-  String _activity = "No device connected";
-  bool _isConnected = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _setupListeners();
-  }
 
-  void _setupListeners() {
-    // Listen to connection status
-    widget.bluetoothService.connectionStream.listen((connected) {
-      setState(() {
-        _isConnected = connected;
-        if (!connected) _activity = "No device connected";
-      });
-    });
-
-    // Listen to the prediction data stream
-    widget.bluetoothService.predictionDataStringStream.listen((dataStr) {
-      final parsed = BluetoothService.parsePredictionData(utf8.encode(dataStr));
-      if (parsed != _activity) {
-        setState(() => _activity = parsed);
-      }
-    });
-  }
-
-  final Map<String, String> _activityGifMapping = {
+  static const Map<String, String> _activityGifMapping = {
     "Cycling": "assets/gifs/cycling.gif",
     "WalkDownstairs": "assets/gifs/stairsDown.gif",
     "Jogging": "assets/gifs/jogging.gif",
@@ -54,8 +26,7 @@ class _ActivityDisplayWidgetState extends State<ActivityDisplayWidget> {
 
   @override
   Widget build(BuildContext context) {
-    final gifPath = _activityGifMapping[_activity] ??
-        _activityGifMapping["Unknown Activity"]!;
+    final gifPath = _activityGifMapping[activity] ?? _activityGifMapping["Unknown Activity"]!;
     return Container(
       margin: EdgeInsets.only(bottom: 20),
       padding: EdgeInsets.all(15),
@@ -72,14 +43,13 @@ class _ActivityDisplayWidgetState extends State<ActivityDisplayWidget> {
       ),
       child: Row(
         children: [
-          // Connection status indicator
           Container(
             width: 8,
             height: 8,
             margin: EdgeInsets.only(right: 12),
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: _isConnected ? Colors.green : Colors.red,
+              color: isConnected ? Colors.green : Colors.red,
             ),
           ),
           Expanded(
@@ -96,7 +66,7 @@ class _ActivityDisplayWidgetState extends State<ActivityDisplayWidget> {
                 ),
                 SizedBox(height: 4),
                 Text(
-                  _activity,
+                  activity,
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
