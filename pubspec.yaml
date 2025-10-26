@@ -31,6 +31,8 @@ dependencies:
   video_player: ^2.5.1
   flutter_blue_plus: ^1.0.0
   permission_handler: ^11.1.0
+  mobile_scanner: ^3.5.0
+  fluttertoast: ^8.2.4
 
 dev_dependencies:
   flutter_test:

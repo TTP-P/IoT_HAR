@@ -17,12 +17,11 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final BluetoothService _bluetoothService = BluetoothService();
-  List<FlSpot> _accX = [], _accY = [], _accZ = [];
-  List<FlSpot> _gravityX = [], _gravityY = [], _gravityZ = [];
-  List<FlSpot> _linearX = [], _linearY = [], _linearZ = [];
+  //List<FlSpot> _accX = [], _accY = [], _accZ = [];
+  //List<FlSpot> _gravityX = [], _gravityY = [], _gravityZ = [];
+  //List<FlSpot> _linearX = [], _linearY = [], _linearZ = [];
   List<FlSpot> _gyroX = [], _gyroY = [], _gyroZ = [];
   double _latestElapsedTime = 0;
-  late StreamSubscription<List<int>> _sensorSub;
   Timer? _chartTimer;
   int _startTime = 0;
 
@@ -35,16 +34,33 @@ class _HomePageState extends State<HomePage> {
   int _correctCount = 0;
   int _incorrectCount = 0;
 
-  // Configuration for 7 actions (in a real project, these can be imported via external configuration)
-  final List<String> _actions = [
-    "Cycling",
-    "WalkDownstairs",
-    "Jogging",
-    "Lying",
-    "Sitting",
-    "WalkUpstairs",
-    "Walking"
+  // Predefined physical activities
+  var activities = [
+    'Standing',
+    'Lying down on left',
+    'Lying down right',
+    'Lying down back',
+    'Lying down on stomach',
+    'Normal walking',
+    'Ascending stairs',
+    'Descending stairs',
+    'Shuffle walking',
+    'Running',
+    'Miscellaneous movements'
   ];
+  String selected_activity = "Standing";
+
+  // Predefined social signals
+  var social_signals = [
+    'Normal',
+    'Coughing',
+    'Hyperventilating',
+    'Talking',
+    'Eating',
+    'Singing',
+    'Laughing'
+  ];
+  String selected_signal = "Normal";
 
   // Current predicted action of the system (default is "Sitting" in this example)
   String _currentPredictedAction = "Sitting";
@@ -57,13 +73,37 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _startTime = DateTime.now().millisecondsSinceEpoch;
-
-    // Initialize count maps for each action
-    _actionCorrectCount = {for (var a in _actions) a: 0};
-    _actionIncorrectCount = {for (var a in _actions) a: 0};
-
-    _setupActivityListeners();
-    _setupSensorListener();
+    _actionCorrectCount = {for (var a in activities) a: 0};
+    _actionIncorrectCount = {for (var a in activities) a: 0};
+    // 启动蓝牙连接并监听数据
+    _bluetoothService.scanAndConnectRespeck(
+      onData: ({
+        required double x,
+        required double y,
+        required double z,
+        int? batteryLevel,
+        bool? isCharging,
+        int? respeckVersion,
+        String? prediction,
+        int? bufferSize,
+      }) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final elapsed = (now - _startTime) / 1000;
+        setState(() {
+          _latestElapsedTime = elapsed;
+          _gyroX.add(FlSpot(elapsed, x));
+          _gyroY.add(FlSpot(elapsed, y));
+          _gyroZ.add(FlSpot(elapsed, z));
+          _trimData(_gyroX, _gyroY, _gyroZ);
+          if (prediction != null) {
+            _activity = prediction;
+          }
+        });
+      },
+      onStatus: (msg) {
+        // 可选：处理连接状态消息
+      },
+    );
   }
 
   @override
@@ -76,61 +116,12 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _bluetoothService.dispose(); // Ensure resources are released
-    _sensorSub.cancel();
+    _bluetoothService.dispose();
     _chartTimer?.cancel();
     super.dispose();
   }
 
-  void _setupActivityListeners() {
-    // Listen to the prediction data stream
-    _bluetoothService.predictionDataStringStream.listen((dataStr) {
-      final parsed = BluetoothService.parsePredictionData(utf8.encode(dataStr));
-      if (parsed != _activity) {
-        setState(() => _activity = parsed);
-      }
-    });
-  }
 
-  void _setupSensorListener() {
-    _sensorSub = _bluetoothService.sensorDataStream.listen((data) {
-      if (data.length >= 52) {
-        final byteData = Uint8List.fromList(data).buffer.asByteData();
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final elapsed = (now - _startTime) / 1000;
-
-        setState(() {
-          _latestElapsedTime = elapsed;
-
-          // Acceleration data
-          _accX.add(FlSpot(elapsed, byteData.getFloat32(4, Endian.little)));
-          _accY.add(FlSpot(elapsed, byteData.getFloat32(8, Endian.little)));
-          _accZ.add(FlSpot(elapsed, byteData.getFloat32(12, Endian.little)));
-
-          // Gravity data
-          _gravityX.add(FlSpot(elapsed, byteData.getFloat32(16, Endian.little)));
-          _gravityY.add(FlSpot(elapsed, byteData.getFloat32(20, Endian.little)));
-          _gravityZ.add(FlSpot(elapsed, byteData.getFloat32(24, Endian.little)));
-
-          // Linear acceleration
-          _linearX.add(FlSpot(elapsed, byteData.getFloat32(28, Endian.little)));
-          _linearY.add(FlSpot(elapsed, byteData.getFloat32(32, Endian.little)));
-          _linearZ.add(FlSpot(elapsed, byteData.getFloat32(36, Endian.little)));
-
-          // Gyroscope data
-          _gyroX.add(FlSpot(elapsed, byteData.getFloat32(40, Endian.little)));
-          _gyroY.add(FlSpot(elapsed, byteData.getFloat32(44, Endian.little)));
-          _gyroZ.add(FlSpot(elapsed, byteData.getFloat32(48, Endian.little)));
-
-          // Maintain data length
-          _trimData(_accX, _accY, _accZ);
-          _trimData(_gravityX, _gravityY, _gravityZ);
-          _trimData(_linearX, _linearY, _linearZ);
-          _trimData(_gyroX, _gyroY, _gyroZ);
-        });
-      }
-    });
-  }
 
   void _trimData(List<FlSpot> x, List<FlSpot> y, List<FlSpot> z) {
     const maxPoints = 100;
@@ -242,7 +233,7 @@ class _HomePageState extends State<HomePage> {
     return BarChart(
       BarChartData(
         maxY: 100,
-        barGroups: _actions.asMap().entries.map((entry) {
+        barGroups: activities.asMap().entries.map((entry) {
           int index = entry.key;
           String action = entry.value;
           int correct = _actionCorrectCount[action] ?? 0;
@@ -270,13 +261,13 @@ class _HomePageState extends State<HomePage> {
               reservedSize: 60,
               getTitlesWidget: (double value, TitleMeta meta) {
                 final int index = value.toInt();
-                if (index >= 0 && index < _actions.length) {
+                if (index >= 0 && index < activities.length) {
                   return Padding(
                     padding: const EdgeInsets.only(top: 8.0),
                     child: RotatedBox(
                       quarterTurns: 1,
                       child: Text(
-                        _actions[index],
+                        activities[index],
                         style: const TextStyle(fontSize: 10),
                       ),
                     ),
@@ -634,7 +625,7 @@ class _HomePageState extends State<HomePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Prediction action widget (displays "CURRENT ACTIVITY", "No device connected", etc.)
-                    ActivityDisplayWidget(bluetoothService: _bluetoothService),
+                    ActivityDisplayWidget(activity: _activity, isConnected: true),
 
                     const SizedBox(height: 10),
 
@@ -720,7 +711,7 @@ class _HomePageState extends State<HomePage> {
                     pageSnapping: true,
                     scrollDirection: Axis.horizontal,
                     children: [
-                      _buildSensorChart(
+                    /*  _buildSensorChart(
                         "Acceleration",
                         _accX,
                         _accY,
@@ -746,7 +737,7 @@ class _HomePageState extends State<HomePage> {
                         minY: -30.0,
                         maxY: 30.0,
                         width: availableWidth,
-                      ),
+                      ),*/
                       _buildSensorChart(
                         "Gyroscope",
                         _gyroX,
