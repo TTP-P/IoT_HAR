@@ -1,8 +1,7 @@
-
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:convert';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fb;
-import '../globals.dart';
+import 'dart:typed_data';
 
 enum ConnectionState {
   disconnected,
@@ -10,163 +9,212 @@ enum ConnectionState {
   connected
 }
 
-
-
-
-// 工具函数：将两个字节合成为加速度值（g）
-double combineAccelBytes(int upper, int lower) {
-  int lower2 = lower & 0xFF;
-  int value = (upper << 8) | lower2;
-  return (value) / 16384.0;
-}
 class BluetoothService {
   static final BluetoothService _instance = BluetoothService._internal();
   factory BluetoothService() => _instance;
   BluetoothService._internal();
 
-  fb.BluetoothDevice? _respeckDevice;
-  int respeckVersion = 0;
+  final fb.FlutterBluePlus fbp = fb.FlutterBluePlus();
+  fb.BluetoothDevice? _connectedDevice;
 
-  /// 扫描并连接 Respeck 设备，解析数据流
-  Future<void> scanAndConnectRespeck({
-    required void Function({
-      required double x,
-      required double y,
-      required double z,
-      int? batteryLevel,
-      bool? isCharging,
-      int? respeckVersion,
-      String? prediction,
-      int? bufferSize,
-    }) onData,
-    required void Function(String msg) onStatus,
-  }) async {
-    _respeckDevice = null;
-    respeckVersion = 0;
-    onStatus("Searching for Respeck $respeckUUID...");
+  // Define separate variables for each target characteristic.
+  fb.BluetoothCharacteristic? _predictionCharacteristic;
+  fb.BluetoothCharacteristic? _sensorCharacteristic;
 
-    final scanSub = fb.FlutterBluePlus.onScanResults.listen((results) {
-      for (final r in results) {
-        if (_respeckDevice == null && r.device.remoteId.str == respeckUUID) {
-          if (r.advertisementData.advName == "Res6AL") {
-            _respeckDevice = r.device;
-            respeckVersion = 6;
-            fwString = "6AL";
-          } else if (r.advertisementData.advName == "ResV5i") {
-            _respeckDevice = r.device;
-            respeckVersion = 5;
-            fwString = "5i";
-          } else {
-            onStatus("Respeck firmware is too old");
-          }
-        }
-      }
-    }, onError: (e) => onStatus("Scan error: $e"));
+  // Create separate StreamControllers to handle the data separately.
+  final StreamController<List<fb.BluetoothDevice>> _bondedDevicesController =
+  StreamController<List<fb.BluetoothDevice>>.broadcast();
+  final StreamController<List<fb.ScanResult>> _scanResultsController =
+  StreamController<List<fb.ScanResult>>.broadcast();
 
-    fb.FlutterBluePlus.cancelWhenScanComplete(scanSub);
+  // Separate controllers for prediction and sensor data.
+  final StreamController<List<int>> _predictionDataController =
+  StreamController<List<int>>.broadcast();
+  final StreamController<List<int>> _sensorDataController =
+  StreamController<List<int>>.broadcast();
+  final StreamController<ConnectionState> _connectionStateController =
+  StreamController<ConnectionState>.broadcast();
 
-    await fb.FlutterBluePlus.adapterState
-        .where((val) => val == fb.BluetoothAdapterState.on)
-        .first;
+  // Expose streams for external listeners.
+  Stream<List<fb.BluetoothDevice>> get bondedDevicesStream =>
+      _bondedDevicesController.stream;
+  Stream<List<fb.ScanResult>> get scanResultsStream =>
+      _scanResultsController.stream;
+  Stream<List<int>> get predictionDataStream => _predictionDataController.stream;
+  Stream<List<int>> get sensorDataStream => _sensorDataController.stream;
+  Stream<ConnectionState> get connectionStateStream =>
+      _connectionStateController.stream;
 
-    await fb.FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-    await fb.FlutterBluePlus.isScanning.where((val) => val == false).first;
+  bool _isPredictionSubscribed = false;
+  bool _isSensorSubscribed = false;
 
-    if (_respeckDevice == null) {
-      onStatus("No Respeck found.");
-      return;
+  // Added in the BluetoothService class
+  Stream<bool> get connectionStream =>
+      connectionStateStream.map((state) => state == ConnectionState.connected);
+
+  Stream<String> get predictionDataStringStream =>
+      predictionDataStream.map((data) => utf8.decode(data));
+
+  // Combined subscription status
+  bool get isSubscribed => _isPredictionSubscribed && _isSensorSubscribed;
+
+  /// Initializes Bluetooth service.
+  void initialize() {
+    getBondedDevices();
+    startScan();
+  }
+
+  /// Gets bonded (paired) Bluetooth devices.
+  Future<void> getBondedDevices() async {
+    try {
+      List<fb.BluetoothDevice> devices = await fb.FlutterBluePlus.bondedDevices;
+      _bondedDevicesController.add(devices);
+      print("Bonded Devices: ${devices.map((d) => d.platformName).toList()}");
+    } catch (e) {
+      print("Error fetching bonded devices: $e");
     }
+  }
 
-    // 连接设备
-    await _respeckDevice!.connect();
-    onStatus("Connected to \\${_respeckDevice.toString()}");
+  /// Starts scanning for available BLE devices.
+  Future<void> startScan() async {
+    fb.FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
 
-    // 监听断开
-    final disconnectSub = _respeckDevice!.connectionState.listen((state) {
-      if (state == fb.BluetoothConnectionState.disconnected) {
-        onStatus("Respeck disconnected");
+    fb.FlutterBluePlus.scanResults.listen((results) {
+      _scanResultsController.add(results);
+      for (fb.ScanResult r in results) {
+        print('Discovered device: ${r.device.platformName} (${r.device.remoteId})');
       }
     });
-    _respeckDevice!.cancelWhenDisconnected(disconnectSub, delayed: true, next: true);
 
-    // 发现服务
-    final services = await _respeckDevice!.discoverServices();
-    fb.BluetoothService? ser;
-    fb.BluetoothCharacteristic? cha;
-    for (final s in services) {
-      if (s.serviceUuid.str == "00001523-1212-efde-1523-785feabcd125") {
-        ser = s;
-        break;
-      }
+    Future.delayed(const Duration(seconds: 5), () {
+      fb.FlutterBluePlus.stopScan();
+    });
+  }
+
+  /// Connects to a selected device and discovers its services.
+  Future<void> connectToDevice(fb.BluetoothDevice device) async {
+    try {
+      _connectionStateController.add(ConnectionState.connecting);
+      await device.connect();
+      _connectedDevice = device;
+      _connectionStateController.add(ConnectionState.connected);
+      discoverServices(device);
+    } catch (e) {
+      _connectionStateController.add(ConnectionState.disconnected);
+      print("Connection failed: $e");
     }
-    if (ser != null) {
-      for (final c in ser.characteristics) {
-        if (c.characteristicUuid.str == "00001524-1212-efde-1523-785feabcd125") {
-          cha = c;
-          break;
+  }
+
+  /// Discovers services and subscribes to notifications for two specific characteristics.
+  Future<void> discoverServices(fb.BluetoothDevice device) async {
+    List<fb.BluetoothService> services = await device.discoverServices();
+    for (fb.BluetoothService service in services) {
+      for (fb.BluetoothCharacteristic characteristic in service.characteristics) {
+        print("Discovered Characteristic: ${characteristic.uuid}");
+        // Check for the prediction characteristic UUID.
+        if (characteristic.uuid.toString().toLowerCase() ==
+            "19b10012-e8f2-537e-4f6c-d104768a1214") {
+          _predictionCharacteristic = characteristic;
+          readCharacteristic(characteristic);
+          monitorCharacteristic(characteristic, _predictionDataController);
+        }
+        // Check for the sensor data characteristic UUID.
+        else if (characteristic.uuid.toString().toLowerCase() ==
+            "19b10013-e8f2-537e-4f6c-d104768a1215") {
+          _sensorCharacteristic = characteristic;
+          readCharacteristic(characteristic);
+          monitorCharacteristic(characteristic, _sensorDataController);
         }
       }
     }
-    if (cha == null) {
-      onStatus("Respeck accel characteristic not found");
-      return;
+  }
+
+  /// Reads data from a characteristic.
+  Future<void> readCharacteristic(fb.BluetoothCharacteristic characteristic) async {
+    try {
+      List<int> value = await characteristic.read();
+      String data = utf8.decode(value);
+      print("Read Data from ${characteristic.uuid}: $data");
+      // Here you might add the value to the corresponding stream if needed.
+    } catch (e) {
+      print("Error reading characteristic: $e");
     }
+  }
 
-    // 订阅数据
-    final dataSub = cha.onValueReceived.listen((value) async {
-      final ul = Uint8List.fromList(value);
-      final bd = ul.buffer.asByteData();
-      int ts = bd.getUint32(0);
-      ts = (ts * 197 * 1000 / 32768).toInt();
-      int packetSeqNumber = bd.getUint16(4);
+  /// Subscribes to characteristic notifications and directs the data to the provided controller.
+  void monitorCharacteristic(
+      fb.BluetoothCharacteristic characteristic,
+      StreamController<List<int>> controller) async {
+    try {
+      if (characteristic.properties.notify) {
+        await characteristic.setNotifyValue(true);
 
-      int? battLevel;
-      bool charging = false;
-      if (respeckVersion == 6) {
-        battLevel = bd.getUint8(6);
-        charging = bd.getUint8(7) == 1;
+        // Update subscription status based on the characteristic type
+        if (characteristic == _predictionCharacteristic) {
+          _isPredictionSubscribed = true;
+        } else if (characteristic == _sensorCharacteristic) {
+          _isSensorSubscribed = true;
+        }
+
+        characteristic.lastValueStream.listen((value) {
+          controller.add(value);
+        });
       }
+    } catch (e) {
+      print("Failed to subscribe to characteristic: $e");
+      // Reset subscription status (optional)
+      _isPredictionSubscribed = false;
+      _isSensorSubscribed = false;
+    }
+  }
 
-      int seqNumInPacket = 0;
-      double x = 0, y = 0, z = 0;
-      for (int i = 8; i < bd.lengthInBytes; i += 6) {
-        int b1 = bd.getInt8(i);
-        int b2 = bd.getInt8(i + 1);
-        x = combineAccelBytes(b1, b2);
-        int b3 = bd.getInt8(i + 2);
-        int b4 = bd.getInt8(i + 3);
-        y = combineAccelBytes(b3, b4);
-        int b5 = bd.getInt8(i + 4);
-        int b6 = bd.getInt8(i + 5);
-        z = combineAccelBytes(b5, b6);
+  /// Disconnects from the connected device.
+  Future<void> disconnectDevice() async {
+    if (_connectedDevice != null) {
+      await _connectedDevice!.disconnect();
+      print("Disconnected from device: ${_connectedDevice!.platformName}");
+      _connectedDevice = null;
+      _predictionCharacteristic = null;
+      _sensorCharacteristic = null;
+    }
+  }
 
-        // HARService.addSample(x, y, z); // 你可以在外部调用
-        seqNumInPacket++;
+  static String parsePredictionData(List<int> data) {
+    try {
+      if (data.length >= 8) {
+        final byteData = ByteData.sublistView(Uint8List.fromList(data));
+        final prediction = byteData.getInt32(4, Endian.little);
+        return _mapPredictionCode(prediction);
       }
+      return "Invalid Data";
+    } catch (e) {
+      return "Parse Error";
+    }
+  }
 
-      String? prediction;
-      // if (HARService.hasEnoughSamples()) {
-      //   prediction = HARService.predict();
-      // }
+  static String _mapPredictionCode(int code) {
+    const map = {
+      0: "Cycling",
+      1: "WalkDownstairs",
+      2: "Jogging",
+      3: "Lying",
+      4: "Sitting",
+      5: "WalkUpstairs",
+      6: "Walking"
+    };
+    return map[code] ?? "Unknown Activity";
+  }
 
-      onData(
-        x: x,
-        y: y,
-        z: z,
-        batteryLevel: battLevel,
-        isCharging: charging,
-        respeckVersion: respeckVersion,
-        prediction: prediction,
-        bufferSize: null,
-      );
-    });
-    _respeckDevice!.cancelWhenDisconnected(dataSub);
-
-    await Future.delayed(const Duration(seconds: 3));
-    await cha.setNotifyValue(true);
+  void stopScan() {
+    fb.FlutterBluePlus.stopScan();
   }
 
   void dispose() {
-    _respeckDevice?.disconnect();
+    _bondedDevicesController.close();
+    _scanResultsController.close();
+    _predictionDataController.close();
+    _sensorDataController.close();
+    _connectionStateController.close(); // Also close connection state controller
+    _connectedDevice?.disconnect();
   }
 }
