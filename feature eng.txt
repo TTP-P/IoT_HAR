@@ -1,0 +1,83 @@
+def add_lightweight_features(df, alpha=0.98, eps=1e-8):
+    if 'SourceFile' not in df.columns:
+        raise ValueError("Missing 'SourceFile' column.")
+
+    g_all, jerk_all = [], []
+
+    for _, group_df in df.groupby('SourceFile'):
+        a_g = group_df[['accelX','accelY','accelZ']].to_numpy(float)
+        n = len(a_g)
+
+        g = np.zeros_like(a_g)
+        g[0] = a_g[0]
+        for i in range(1, n):
+            g[i] = alpha * g[i-1] + (1 - alpha) * a_g[i]
+        g_all.append(g)
+
+        jerk = np.zeros_like(a_g)
+        if n > 1:
+            jerk[1:] = a_g[1:] - a_g[:-1]
+        jerk_all.append(jerk)
+
+    # === 拼接后特征 ===
+    a = df[['accelX','accelY','accelZ']].to_numpy(float)
+    g = np.concatenate(g_all)
+    jerk = np.concatenate(jerk_all)
+    lin = a - g
+
+    accelMag = np.linalg.norm(a, axis=1)
+    linAccMag = np.linalg.norm(lin, axis=1)
+    jerkMag = np.linalg.norm(jerk, axis=1)
+
+    g_norm = np.linalg.norm(g, axis=1, keepdims=True) + eps
+    g_hat = g / g_norm
+    a_vert = np.sum(a * g_hat, axis=1)
+    a_proj = a_vert[:, None] * g_hat
+    a_horiz = a - a_proj
+    a_horizMag = np.linalg.norm(a_horiz, axis=1)
+
+    win = 20
+    stride_var = pd.Series(accelMag).rolling(win).std().bfill().to_numpy()
+    movement_consistency = 1 - pd.Series(stride_var).rolling(win).std().bfill().to_numpy()
+    jerk_rms = pd.Series(jerkMag).rolling(win).apply(lambda x: np.sqrt(np.mean(x**2)), raw=True).bfill().to_numpy()
+
+    # === 写回 DataFrame ===
+    df[['gravityX','gravityY','gravityZ']] = g
+    df[['linAccX','linAccY','linAccZ']] = lin
+    df['accelMag'] = accelMag
+    df['linAccMag'] = linAccMag
+    df['jerkMag'] = jerkMag
+    df['accelVert'] = a_vert
+    df['accelHorizMag'] = a_horizMag
+    df['stride_variability'] = stride_var
+    df['movement_consistency'] = movement_consistency
+    df['jerk_rms'] = jerk_rms
+
+    return df
+
+窗口和步长:WIN = 50 STEP = 25
+
+
+17个轴
+['accelX','accelY','accelZ',
+ 'gravityX','gravityY','gravityZ',
+ 'linAccX','linAccY','linAccZ',
+ 'accelMag','linAccMag','jerkMag',
+ 'accelVert','accelHorizMag',
+ 'stride_variability','movement_consistency','jerk_rms']
+
+
+模型后处理:
+1:阈值与置信度回退规则
+t = np.array([0,0,0,0,0,0,0.48,0,0,0.60,0], dtype=np.float32)
+
+if pred_class == 9 and conf < 0.60:
+    y_pred = 7
+elif not meet_any_threshold:
+    y_pred = 6
+else:
+    y_pred = pred_class
+
+
+2:时序平滑:
+y_pred = medfilt(y_pred, kernel_size=5)
