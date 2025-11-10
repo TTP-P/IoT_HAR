@@ -5,6 +5,7 @@ import 'utils.dart';
 import 'home.dart';
 import 'globals.dart';
 import 'har_service.dart';
+import 'ssc_service.dart';
 
 // This file contains the BLE code to scan for and connect to a respeck sensor.
 // Once connected, we notify the acceleration characteristic and decode the
@@ -170,8 +171,6 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
       int seqNumInPacket = 0;
       double x = 0, y = 0, z = 0;
 
-      bool predictionReady = false;
-
       for (int i = 8; i < bd.lengthInBytes; i += 6) {
         int b1 = bd.getInt8(i);
         int b2 = bd.getInt8(i + 1);
@@ -189,10 +188,14 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         final featureResult = ui.featureEngineer.processSample(x, y, z);
 
         final featureMap = featureResult.toFeatureMap();
-        final ready = HARService.addFeatureSample(featureMap, isStepBoundary: featureResult.isStepBoundary); if (ready) { predictionReady = true; }
+        HARService.addFeatureSample(
+          featureMap,
+          isStepBoundary: featureResult.isStepBoundary,
+        );
 
-
-        // final featureResult = ui.featureEngineer.processSample(x, y, z);
+        final Map<String, double> sscFeatureMap =
+            ui.sscFeatureEngineer.process(featureResult);
+        SSCService.addFeatureSample(sscFeatureMap);
 
         csv_str +=
             "${packet_received_ts.millisecondsSinceEpoch},$ts,$packetSeqNumber,$seqNumInPacket,$x,$y,$z,${featureResult.gravityX},${featureResult.gravityY},${featureResult.gravityZ},${featureResult.linAccX},${featureResult.linAccY},${featureResult.linAccZ},${featureResult.accelMag},${featureResult.linAccMag},${featureResult.jerkMag},${featureResult.accelVert},${featureResult.accelHorizMag},${featureResult.strideVariability},${featureResult.movementConsistency},${featureResult.jerkRms}\n";
@@ -201,10 +204,9 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         ui.recorded_samples++;
       }
 
-      // Perform HAR prediction if we have enough samples
-      String? prediction;
-      if (predictionReady) { prediction = HARService.getLatestPrediction(); }
-
+      final String? harPrediction = HARService.getLatestPrediction();
+      final String? harLabel = HARService.getLatestLabel();
+      final SscPrediction? sscPrediction = SSCService.getLatestPrediction();
 
       // Update the UI to show the latest data (called once per packet)
       ui.updateUI(
@@ -214,8 +216,10 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         batteryLevel: battLevel,
         isCharging: charging,
         respeckVersion: respeckVersion,
-        prediction: prediction,
-        bufferSize: HARService.getBufferSize()
+        harPrediction: harPrediction,
+        harLabel: harLabel,
+        sscPrediction: sscPrediction,
+        harBufferSize: HARService.getBufferSize(),
       );
 
       // update elapsed time counter if recording

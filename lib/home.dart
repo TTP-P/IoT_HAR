@@ -7,6 +7,7 @@ import 'globals.dart';
 import 'dart:io';
 import 'dart:math';
 import 'har_service.dart';
+import 'ssc_service.dart';
 
 const int featureWindowSize = 25; // Window size for engineered feature windows
 const int featureStepSize = 10; // Step size (stride) for downstream model use
@@ -80,6 +81,11 @@ class MyHomePageState extends State<MyHomePage> {
         windowSize: featureWindowSize,
         stepSize: featureStepSize,
       );
+  final SscFeatureEngineer sscFeatureEngineer = SscFeatureEngineer();
+  final PredictionCoordinator predictionCoordinator = PredictionCoordinator(
+    consecutiveThreshold: 3,
+    minConfidence: 0.5,
+  );
 
   @override
   void initState() {
@@ -90,6 +96,7 @@ class MyHomePageState extends State<MyHomePage> {
   // Initialize the HAR service
   void _initializeHAR() async {
     await HARService.initialize();
+    await SSCService.initialize();
     setState(() {
       predicted_activity = "HAR ready - waiting for data...";
     });
@@ -110,8 +117,10 @@ class MyHomePageState extends State<MyHomePage> {
     int? batteryLevel,
     bool isCharging = false,
     required int respeckVersion,
-    String? prediction,
-    required int bufferSize,
+    String? harPrediction,
+    String? harLabel,
+    SscPrediction? sscPrediction,
+    required int harBufferSize,
   }) {
     setState(() {
       accel = "x=${x.toStringAsFixed(3)}, y=${y.toStringAsFixed(3)}, z=${z.toStringAsFixed(3)}";
@@ -126,12 +135,14 @@ class MyHomePageState extends State<MyHomePage> {
         batt_level = "";
       }
       
-      // Update HAR prediction in UI
-      if (prediction != null) {
-        predicted_activity = prediction;
-      } else {
-        predicted_activity ="Collecting data... ($bufferSize/$featureWindowSize samples)";
-      }
+      final String displayText = predictionCoordinator.resolve(
+        harDisplay: harPrediction,
+        harLabel: harLabel,
+        harBufferSize: harBufferSize,
+        harWindowSize: featureWindowSize,
+        sscPrediction: sscPrediction,
+      );
+      predicted_activity = displayText;
     });
   }
 
@@ -140,6 +151,8 @@ class MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     HARService.dispose();
+    SSCService.dispose();
+    predictionCoordinator.reset();
     super.dispose();
   }
 
@@ -327,6 +340,7 @@ class MyHomePageState extends State<MyHomePage> {
 
     recorded_samples = 0;
     featureEngineer.reset();
+    sscFeatureEngineer.reset();
     DateTime now =
         DateTime.now().toUtc(); //use current UTC timestamp for filename
     start_timestamp = now;
@@ -729,5 +743,456 @@ class LightweightFeatureEngineer {
       sumSquares += value * value;
     }
     return sqrt(sumSquares);
+  }
+}
+
+class SscFeatureEngineer {
+  SscFeatureEngineer({
+    this.samplingFrequency = 12.5,
+    this.win = 20,
+  })  : _winLong = win * 2,
+        _maxJerkHistory = max(50, win * 2);
+
+  final double samplingFrequency;
+  final int win;
+
+  static const double _eps = 1e-8;
+  static const int _fftWindow = 64;
+  static const int _respWindow = 64;
+  static const int _breathingDropWindow = 10;
+  static const int _jerkShortWindow = 5;
+  static const int _jerkLongWindow = 50;
+  static const int _linShortWindow = 8;
+  static const int _linLongWindow = 32;
+
+  final int _winLong;
+  final int _maxJerkHistory;
+
+  final List<double> _jerkMagHistory = <double>[];
+  final List<double> _burstFlags = <double>[];
+  final List<double> _vertHistory = <double>[];
+  final List<double> _diffHistory = <double>[];
+  final List<double> _linAccHistory = <double>[];
+  final List<double> _accelMagHistory = <double>[];
+  final List<int> _zeroCrossHistory = <int>[];
+  final List<double> _breathingDropHistory = <double>[];
+
+  double? _previousVertical;
+  int? _previousSign;
+  double _lastBreathingStability = 1.0;
+
+  void reset() {
+    _jerkMagHistory.clear();
+    _burstFlags.clear();
+    _vertHistory.clear();
+    _diffHistory.clear();
+    _linAccHistory.clear();
+    _accelMagHistory.clear();
+    _zeroCrossHistory.clear();
+    _breathingDropHistory.clear();
+    _previousVertical = null;
+    _previousSign = null;
+    _lastBreathingStability = 1.0;
+  }
+
+  Map<String, double> process(FeatureResult sample) {
+    _appendDouble(_jerkMagHistory, sample.jerkMag, _maxJerkHistory);
+    final double rawVertical = sample.accelZ; 
+    _appendDouble(_vertHistory, rawVertical, _respWindow);
+    final double diffValue = _previousVertical == null
+        ? 0.0
+        : (rawVertical - _previousVertical!).abs();
+    _previousVertical = rawVertical;
+    _appendDouble(_diffHistory, diffValue, win);
+    _appendDouble(_linAccHistory, sample.linAccMag, _linLongWindow);
+    _appendDouble(_accelMagHistory, sample.accelMag, _fftWindow);
+    _updateZeroCross(rawVertical);
+
+    final double jerkRms = _rmsTail(_jerkMagHistory, win);
+    final double breathingStability = _breathingStability();
+    final double rhythmStability = _rhythmStability();
+    final double burstDensity = _burstDensity(sample.jerkMag);
+    final double coughEnergyRatio = _coughEnergyRatio();
+    final double dominantRespFreq = _dominantRespFreq();
+    final double spectralSharpness = _spectralSharpness();
+    final double zeroCrossRate = _zeroCrossRate();
+    final double shortEnergyRatio = _shortEnergyRatio();
+    final double breathingDisruption = _breathingDisruption(breathingStability);
+
+    return <String, double>{
+      'accelX': sample.accelX,
+      'accelY': sample.accelY,
+      'accelZ': sample.accelZ,
+      'linAccMag': sample.linAccMag,
+      'jerkMag': sample.jerkMag,
+      'jerk_rms': jerkRms,
+      'burst_density': burstDensity,
+      'breathing_stability': breathingStability,
+      'rhythm_stability': rhythmStability,
+      'cough_energy_ratio': coughEnergyRatio,
+      'dominant_resp_freq': dominantRespFreq,
+      'spectral_sharpness': spectralSharpness,
+      'zero_cross_rate': zeroCrossRate,
+      'short_energy_ratio': shortEnergyRatio,
+      'breathing_disruption': breathingDisruption,
+    };
+  }
+
+  double _breathingStability() {
+    final int count = min(win, _vertHistory.length);
+    if (count <= 1) {
+      return 1.0;
+    }
+    final int start = _vertHistory.length - count;
+    double mean = 0.0;
+    for (int i = start; i < _vertHistory.length; i++) {
+      mean += _vertHistory[i];
+    }
+    mean /= count;
+    double variance = 0.0;
+    for (int i = start; i < _vertHistory.length; i++) {
+      final double diff = _vertHistory[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= count;
+    final double std = sqrt(max(variance, 0.0));
+    return (1.0 - std).clamp(0.0, 1.0);
+  }
+
+  double _rhythmStability() {
+    if (_diffHistory.isEmpty) {
+      return 1.0;
+    }
+    double sum = 0.0;
+    for (final double value in _diffHistory) {
+      sum += value;
+    }
+    final double mean = sum / _diffHistory.length;
+    return (1.0 - mean).clamp(0.0, 1.0);
+  }
+
+  double _burstDensity(double jerkMag) {
+    final int count = min(_winLong, _jerkMagHistory.length);
+    if (count < 10) {
+      _appendDouble(_burstFlags, 0.0, win);
+      return _average(_burstFlags).clamp(0.0, 1.0);
+    }
+    final int start = _jerkMagHistory.length - count;
+    double mean = 0.0;
+    for (int i = start; i < _jerkMagHistory.length; i++) {
+      mean += _jerkMagHistory[i];
+    }
+    mean /= count;
+    double variance = 0.0;
+    for (int i = start; i < _jerkMagHistory.length; i++) {
+      final double diff = _jerkMagHistory[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= count;
+    final double std = sqrt(max(variance, 0.0));
+    final double threshold = mean + 2.5 * std;
+    final double peak = jerkMag > threshold ? 1.0 : 0.0;
+    _appendDouble(_burstFlags, peak, win);
+    return _average(_burstFlags).clamp(0.0, 1.0);
+  }
+
+  double _coughEnergyRatio() {
+    final double shortMean = _meanTail(_jerkMagHistory, _jerkShortWindow, 1);
+    final double longMean = _meanTail(_jerkMagHistory, _jerkLongWindow, 10);
+    if (longMean.abs() < _eps) {
+      return 0.0;
+    }
+    return (shortMean / longMean).clamp(0.0, 10.0);
+  }
+
+  double _dominantRespFreq() {
+    if (_vertHistory.length < _respWindow) {
+      return 0.0;
+    }
+    final int start = _vertHistory.length - _respWindow;
+    double mean = 0.0;
+    for (int i = start; i < _vertHistory.length; i++) {
+      mean += _vertHistory[i];
+    }
+    mean /= _respWindow;
+    double variance = 0.0;
+    for (int i = start; i < _vertHistory.length; i++) {
+      final double diff = _vertHistory[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= _respWindow;
+    if (variance < _eps) {
+      return 0.0;
+    }
+
+    double bestFreq = 0.0;
+    double bestPower = 0.0;
+    final int n = _respWindow;
+    for (int k = 0; k <= n ~/ 2; k++) {
+      final double freq = k * samplingFrequency / n;
+      if (freq < 0.1 || freq > 2.0) {
+        continue;
+      }
+      double real = 0.0;
+      double imag = 0.0;
+      for (int t = 0; t < n; t++) {
+        final double angle = 2 * pi * k * t / n;
+        final double value = _vertHistory[start + t];
+        real += value * cos(angle);
+        imag -= value * sin(angle);
+      }
+      final double power = real * real + imag * imag;
+      if (power > bestPower) {
+        bestPower = power;
+        bestFreq = freq;
+      }
+    }
+    return bestFreq.clamp(0.0, 2.0);
+  }
+
+  double _spectralSharpness() {
+    final int n = min(_fftWindow, _accelMagHistory.length);
+    if (n < 16) {
+      return 0.0;
+    }
+    final int start = _accelMagHistory.length - n;
+    double mean = 0.0;
+    for (int i = start; i < _accelMagHistory.length; i++) {
+      mean += _accelMagHistory[i];
+    }
+    mean /= n;
+    double variance = 0.0;
+    for (int i = start; i < _accelMagHistory.length; i++) {
+      final double diff = _accelMagHistory[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= n;
+    if (variance < _eps) {
+      return 0.0;
+    }
+
+    final int fftLen = n;
+    final int freqBins = (fftLen ~/ 2) + 1;
+    final List<double> window = List<double>.generate(
+      fftLen,
+      (int t) => 0.5 - 0.5 * cos(2 * pi * t / (fftLen - 1)),
+    );
+    final List<double> psd = List<double>.filled(freqBins, 0.0);
+
+    for (int k = 0; k < freqBins; k++) {
+      double real = 0.0;
+      double imag = 0.0;
+      for (int t = 0; t < fftLen; t++) {
+        final double angle = 2 * pi * k * t / fftLen;
+        final double value = _accelMagHistory[start + t] * window[t];
+        real += value * cos(angle);
+        imag -= value * sin(angle);
+      }
+      psd[k] = (real * real + imag * imag) / fftLen;
+    }
+
+    double totalPower = 0.0;
+    double maxPower = 0.0;
+    for (final double power in psd) {
+      totalPower += power;
+      if (power > maxPower) {
+        maxPower = power;
+      }
+    }
+    if (totalPower <= _eps) {
+      return 0.0;
+    }
+    return (maxPower / totalPower).clamp(0.0, 1.0);
+  }
+
+  void _updateZeroCross(double value) {
+    final int sign = value >= 0 ? 1 : -1;
+    int change = 0;
+    if (_previousSign != null && sign != _previousSign) {
+      change = 1;
+    }
+    _previousSign = sign;
+    _appendInt(_zeroCrossHistory, change, _fftWindow);
+  }
+
+  double _zeroCrossRate() {
+    if (_zeroCrossHistory.length < 2) {
+      return 0.0;
+    }
+    double sum = 0.0;
+    for (final int value in _zeroCrossHistory) {
+      sum += value;
+    }
+    return (sum / _zeroCrossHistory.length).clamp(0.0, 1.0);
+  }
+
+  double _shortEnergyRatio() {
+    final double shortMean =
+        _meanTail(_linAccHistory, _linShortWindow, 2);
+    final double longMean =
+        _meanTail(_linAccHistory, _linLongWindow, 5);
+    if (longMean.abs() < _eps) {
+      return 0.0;
+    }
+    return (shortMean / longMean).clamp(0.0, 10.0);
+  }
+
+  double _breathingDisruption(double stability) {
+    final double drop = (stability - _lastBreathingStability) < -0.05 ? 1.0 : 0.0;
+    _lastBreathingStability = stability;
+    _appendDouble(_breathingDropHistory, drop, _breathingDropWindow);
+    return _average(_breathingDropHistory).clamp(0.0, 1.0);
+  }
+
+  double _meanTail(List<double> source, int length, int minSamples) {
+    if (source.isEmpty) {
+      return 0.0;
+    }
+    final int count = min(length, source.length);
+    if (count < minSamples) {
+      return 0.0;
+    }
+    final int start = source.length - count;
+    double sum = 0.0;
+    for (int i = start; i < source.length; i++) {
+      sum += source[i];
+    }
+    return sum / count;
+  }
+
+  double _rmsTail(List<double> source, int length) {
+    if (source.isEmpty) {
+      return 0.0;
+    }
+    final int count = min(length, source.length);
+    if (count == 0) {
+      return 0.0;
+    }
+    final int start = source.length - count;
+    double sumSquares = 0.0;
+    for (int i = start; i < source.length; i++) {
+      final double value = source[i];
+      sumSquares += value * value;
+    }
+    return sqrt(sumSquares / count);
+  }
+
+  double _average(List<double> values) {
+    if (values.isEmpty) {
+      return 0.0;
+    }
+    double sum = 0.0;
+    for (final double value in values) {
+      sum += value;
+    }
+    return sum / values.length;
+  }
+
+  void _appendDouble(List<double> list, double value, int maxLength) {
+    list.add(value);
+    if (list.length > maxLength) {
+      list.removeAt(0);
+    }
+  }
+
+  void _appendInt(List<int> list, int value, int maxLength) {
+    list.add(value);
+    if (list.length > maxLength) {
+      list.removeAt(0);
+    }
+  }
+}
+
+class PredictionCoordinator {
+  PredictionCoordinator({
+    required this.consecutiveThreshold,
+    required this.minConfidence,
+    Set<String>? eligibleHarLabels,
+  }) : _eligibleHarLabels = eligibleHarLabels ??
+            <String>{
+              'Lying back',
+              'Lying left',
+              'Lying right',
+              'Lying stomach',
+              'Sitting / Standing',
+            };
+
+  final int consecutiveThreshold;
+  final double minConfidence;
+  final Set<String> _eligibleHarLabels;
+
+  bool _sscActive = false;
+  String? _candidateLabel;
+  int _candidateCount = 0;
+  SscPrediction? _activePrediction;
+
+  void reset() {
+    _sscActive = false;
+    _candidateLabel = null;
+    _candidateCount = 0;
+    _activePrediction = null;
+  }
+
+  String resolve({
+    required String? harDisplay,
+    required String? harLabel,
+    required int harBufferSize,
+    required int harWindowSize,
+    required SscPrediction? sscPrediction,
+  }) {
+    final bool harEligible =
+        harLabel != null && _eligibleHarLabels.contains(harLabel);
+
+    if (!harEligible) {
+      reset();
+      return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+    }
+
+    if (sscPrediction != null && sscPrediction.confidence >= minConfidence) {
+      if (_candidateLabel == sscPrediction.label) {
+        _candidateCount += 1;
+      } else {
+        _candidateLabel = sscPrediction.label;
+        _candidateCount = 1;
+      }
+    } else {
+      _candidateLabel = null;
+      _candidateCount = 0;
+      if (!_sscActive) {
+        return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+      }
+    }
+
+    if (!_sscActive &&
+        _candidateLabel != null &&
+        _candidateCount >= consecutiveThreshold &&
+        sscPrediction != null &&
+        sscPrediction.confidence >= minConfidence) {
+      _sscActive = true;
+      _activePrediction = sscPrediction;
+    }
+
+    if (_sscActive) {
+      if (sscPrediction != null && sscPrediction.confidence >= minConfidence) {
+        _activePrediction = sscPrediction;
+        return _formatSsc(_activePrediction!);
+      }
+      _sscActive = false;
+      _activePrediction = null;
+      return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+    }
+
+    return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+  }
+
+  String _formatHarText(String? harDisplay, int bufferSize, int window) {
+    final String body =
+        harDisplay ?? "Collecting data... ($bufferSize/$window samples)";
+    return 'HAR - $body';
+  }
+
+  String _formatSsc(SscPrediction prediction) {
+    final double percent = (prediction.confidence * 100).clamp(0, 100);
+    return 'SSC - ${prediction.label} (${percent.toStringAsFixed(1)}%)';
   }
 }

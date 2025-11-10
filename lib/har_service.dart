@@ -27,7 +27,9 @@ class HARService {
 
   static List<String> _activityLabels = List<String>.from(_defaultLabelDisplay);
   static String? _latestPredictionText;
+  static String? _latestLabel;
   static double _latestConfidence = 0.0;
+  static int? _latestClassIndex;
 
   static const List<String> _featureKeys = <String>[
     'accelX',
@@ -207,6 +209,8 @@ class HARService {
   }
 
   static String? getLatestPrediction() => _latestPredictionText;
+  static String? getLatestLabel() => _latestLabel;
+  static double getLatestConfidence() => _latestConfidence;
 
   static int getBufferSize() => _featureBuffer.length;
 
@@ -217,7 +221,9 @@ class HARService {
     _probabilityHistory.clear();
     _lastConfidenceAdjustedClass = null;
     _latestPredictionText = null;
+    _latestLabel = null;
     _latestConfidence = 0.0;
+    _latestClassIndex = null;
   }
 
   static void dispose() {
@@ -294,12 +300,15 @@ class HARService {
     final int finalClass =
         softClass == _miscIndex ? softClass : step3Class;
 
+    _latestClassIndex = finalClass;
+
     _latestConfidence = smoothedProbabilities[finalClass];
     final String label = finalClass < _activityLabels.length
         ? _activityLabels[finalClass]
         : 'Class $finalClass';
     _latestPredictionText =
         '$label (${(_latestConfidence * 100).toStringAsFixed(1)}%)';
+    _latestLabel = label;
   }
 
   static int _medianLabel(List<int> history) {
