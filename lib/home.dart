@@ -8,8 +8,8 @@ import 'dart:io';
 import 'dart:math';
 import 'har_service.dart';
 
-const int featureWindowSize = 50; // Window size for engineered feature windows
-const int featureStepSize = 25; // Step size (stride) for downstream model use
+const int featureWindowSize = 25; // Window size for engineered feature windows
+const int featureStepSize = 10; // Step size (stride) for downstream model use
 
 // The home page includes buttons to connect to the respeck, enter capture
 // metadata and start recording.
@@ -89,11 +89,9 @@ class MyHomePageState extends State<MyHomePage> {
 
   // Initialize the HAR service
   void _initializeHAR() async {
-    bool success = await HARService.initialize();
+    await HARService.initialize();
     setState(() {
-      predicted_activity = success 
-        ? "HAR ready - waiting for data..." 
-        : "HAR initialization failed";
+      predicted_activity = "HAR ready - waiting for data...";
     });
   }
 
@@ -364,9 +362,19 @@ class FeatureResult {
     required this.jerkMag,
     required this.accelVert,
     required this.accelHorizMag,
+    required this.jerkVert,
+    required this.jerkHorizMag,
+    required this.jerkRms,
+    required this.jerkInstability,
+    required this.vertEnergyRatio,
+    required this.horizEnergyRatio,
+    required this.highfreqRatio,
+    required this.gaitPeriodicity,
     required this.strideVariability,
     required this.movementConsistency,
-    required this.jerkRms,
+    required this.vertVelocitySigned,
+    required this.vertVelocityTrend,
+    required this.lateralBalance,
     required this.sampleIndex,
     required this.isStepBoundary,
   });
@@ -385,9 +393,19 @@ class FeatureResult {
   final double jerkMag;
   final double accelVert;
   final double accelHorizMag;
+  final double jerkVert;
+  final double jerkHorizMag;
   final double strideVariability;
   final double movementConsistency;
   final double jerkRms;
+  final double jerkInstability;
+  final double vertEnergyRatio;
+  final double horizEnergyRatio;
+  final double highfreqRatio;
+  final double gaitPeriodicity;
+  final double vertVelocitySigned;
+  final double vertVelocityTrend;
+  final double lateralBalance;
   final int sampleIndex;
   final bool isStepBoundary;
 
@@ -405,11 +423,19 @@ class FeatureResult {
       'accelMag': accelMag,
       'linAccMag': linAccMag,
       'jerkMag': jerkMag,
-      'accelVert': accelVert,
-      'accelHorizMag': accelHorizMag,
+      'jerkVert': jerkVert,
+      'jerkHorizMag': jerkHorizMag,
+      'jerk_rms': jerkRms,
+      'jerk_instability': jerkInstability,
+      'vert_energy_ratio': vertEnergyRatio,
+      'horiz_energy_ratio': horizEnergyRatio,
+      'highfreq_ratio': highfreqRatio,
+      'gait_periodicity': gaitPeriodicity,
       'stride_variability': strideVariability,
       'movement_consistency': movementConsistency,
-      'jerk_rms': jerkRms,
+      'vert_velocity_signed': vertVelocitySigned,
+      'vert_velocity_trend': vertVelocityTrend,
+      'lateral_balance': lateralBalance,
     };
   }
 }
@@ -428,12 +454,20 @@ class LightweightFeatureEngineer {
   final int windowSize;
   final int stepSize;
 
+  static const int _rollingWindow = 20;
+  static const double _samplingFrequency = 12.5;
+
   List<double>? _gravity;
   List<double>? _previousAccel;
   final List<double> _accelMagWindow = [];
   final List<double> _strideVarWindow = [];
   final List<double> _jerkMagWindow = [];
+  final List<double> _jerkInstabilityWindow = [];
+  final List<double> _accelVertWindow = [];
+  final List<double> _vertVelocityWindow = [];
   int _sampleCount = 0;
+  double _vertVelocitySum = 0.0;
+  double _previousVertVelocity = 0.0;
 
   void reset() {
     _gravity = null;
@@ -441,7 +475,12 @@ class LightweightFeatureEngineer {
     _accelMagWindow.clear();
     _strideVarWindow.clear();
     _jerkMagWindow.clear();
+    _jerkInstabilityWindow.clear();
+    _accelVertWindow.clear();
+    _vertVelocityWindow.clear();
     _sampleCount = 0;
+    _vertVelocitySum = 0.0;
+    _previousVertVelocity = 0.0;
   }
 
   FeatureResult processSample(double accelX, double accelY, double accelZ) {
@@ -482,20 +521,54 @@ class LightweightFeatureEngineer {
 
     final double accelVert =
         a[0] * gHat[0] + a[1] * gHat[1] + a[2] * gHat[2];
-
     final List<double> accelProj =
         List<double>.generate(3, (index) => gHat[index] * accelVert);
     final List<double> accelHoriz =
         List<double>.generate(3, (index) => a[index] - accelProj[index]);
-
     final double accelHorizMag = _norm(accelHoriz);
 
-    final double strideVar = _updateStdWindow(_accelMagWindow, accelMag);
+    final double jerkVert =
+        jerk[0] * gHat[0] + jerk[1] * gHat[1] + jerk[2] * gHat[2];
+    final List<double> jerkProj =
+        List<double>.generate(3, (index) => gHat[index] * jerkVert);
+    final List<double> jerkHoriz =
+        List<double>.generate(3, (index) => jerk[index] - jerkProj[index]);
+    final double jerkHorizMag = _norm(jerkHoriz);
+
+    _accelVertWindow.add(accelVert);
+    if (_accelVertWindow.length > windowSize) {
+      _accelVertWindow.removeAt(0);
+    }
+
+    final double strideVar =
+        _updateStdWindow(_accelMagWindow, accelMag, _rollingWindow);
     final double movementConsistency =
-        1 - _updateStdWindow(_strideVarWindow, strideVar);
-    final double jerkRms = _updateRmsWindow(_jerkMagWindow, jerkMag);
-    final bool isStepBoundary = _sampleCount >= windowSize &&
-        ((_sampleCount - windowSize) % stepSize == 0);
+        1 - _updateStdWindow(_strideVarWindow, strideVar, _rollingWindow);
+    final double jerkRms =
+        _updateRmsWindow(_jerkMagWindow, jerkMag, _rollingWindow);
+    final double jerkInstability =
+        _stdMeanCentered(_jerkInstabilityWindow, jerkMag, _rollingWindow);
+
+    _vertVelocityWindow.add(accelVert);
+    _vertVelocitySum += accelVert;
+    if (_vertVelocityWindow.length > _rollingWindow) {
+      _vertVelocitySum -= _vertVelocityWindow.removeAt(0);
+    }
+    final double vertVelocity = _vertVelocitySum;
+    final double vertVelocityTrend = vertVelocity - _previousVertVelocity;
+    _previousVertVelocity = vertVelocity;
+
+    final double energyDenominator = (accelMag * accelMag) + eps;
+    final double vertEnergyRatio = (accelVert * accelVert) / energyDenominator;
+    final double horizEnergyRatio =
+        (accelHorizMag * accelHorizMag) / energyDenominator;
+    final double highfreqRatio = _bandEnergyRatio(_accelVertWindow);
+    final double gaitPeriodicity = _shortAutocorr(_accelVertWindow);
+    final double lateralBalance =
+        gravity[0].abs() / (gravity[1].abs() + eps);
+
+    final bool isStepBoundary =
+        _sampleCount >= windowSize && ((_sampleCount - windowSize) % stepSize == 0);
 
     return FeatureResult(
       accelX: a[0],
@@ -512,24 +585,38 @@ class LightweightFeatureEngineer {
       jerkMag: jerkMag,
       accelVert: accelVert,
       accelHorizMag: accelHorizMag,
+      jerkVert: jerkVert,
+      jerkHorizMag: jerkHorizMag,
+      jerkRms: jerkRms,
+      jerkInstability: jerkInstability,
+      vertEnergyRatio: vertEnergyRatio,
+      horizEnergyRatio: horizEnergyRatio,
+      highfreqRatio: highfreqRatio,
+      gaitPeriodicity: gaitPeriodicity,
       strideVariability: strideVar,
       movementConsistency: movementConsistency,
-      jerkRms: jerkRms,
+      vertVelocitySigned: vertVelocity,
+      vertVelocityTrend: vertVelocityTrend,
+      lateralBalance: lateralBalance,
       sampleIndex: _sampleCount,
       isStepBoundary: isStepBoundary,
     );
   }
 
-  double _updateStdWindow(List<double> window, double newValue) {
+  double _updateStdWindow(
+      List<double> window, double newValue, int maxLength) {
     window.add(newValue);
-    if (window.length > windowSize) {
+    if (window.length > maxLength) {
       window.removeAt(0);
     }
     if (window.length < 2) {
       return 0.0;
     }
-    final double mean =
-        window.reduce((value, element) => value + element) / window.length;
+    double mean = 0.0;
+    for (final double value in window) {
+      mean += value;
+    }
+    mean /= window.length;
     double variance = 0.0;
     for (final double value in window) {
       final double diff = value - mean;
@@ -539,9 +626,10 @@ class LightweightFeatureEngineer {
     return sqrt(variance);
   }
 
-  double _updateRmsWindow(List<double> window, double newValue) {
+  double _updateRmsWindow(
+      List<double> window, double newValue, int maxLength) {
     window.add(newValue);
-    if (window.length > windowSize) {
+    if (window.length > maxLength) {
       window.removeAt(0);
     }
     if (window.isEmpty) {
@@ -552,6 +640,87 @@ class LightweightFeatureEngineer {
       sumSquares += value * value;
     }
     return sqrt(sumSquares / window.length);
+  }
+
+  double _stdMeanCentered(
+      List<double> window, double newValue, int maxLength) {
+    window.add(newValue);
+    if (window.length > maxLength) {
+      window.removeAt(0);
+    }
+    if (window.length < 2) {
+      return 0.0;
+    }
+    double mean = 0.0;
+    for (final double value in window) {
+      mean += value;
+    }
+    mean /= window.length;
+    double variance = 0.0;
+    for (final double value in window) {
+      final double diff = value - mean;
+      variance += diff * diff;
+    }
+    variance /= window.length;
+    return sqrt(variance);
+  }
+
+  double _bandEnergyRatio(List<double> window) {
+    final int n = window.length;
+    if (n < 5) {
+      return 0.0;
+    }
+    final double freqResolution = _samplingFrequency / n;
+    double low = 0.0;
+    double high = 0.0;
+    for (int k = 0; k < n; k++) {
+      double real = 0.0;
+      double imag = 0.0;
+      for (int t = 0; t < n; t++) {
+        final double angle = 2 * pi * k * t / n;
+        final double value = window[t];
+        real += value * cos(angle);
+        imag -= value * sin(angle);
+      }
+      final double power = (real * real + imag * imag) / n;
+      final double freq = k * freqResolution;
+      if (freq >= 0.3 && freq < 2) {
+        low += power;
+      } else if (freq >= 2 && freq < 5) {
+        high += power;
+      }
+    }
+    return high / (low + eps);
+  }
+
+  double _shortAutocorr(List<double> window) {
+    final int n = min(window.length, _rollingWindow);
+    if (n < 5) {
+      return 0.0;
+    }
+    final int start = window.length - n;
+    double mean = 0.0;
+    for (int i = 0; i < n; i++) {
+      mean += window[start + i];
+    }
+    mean /= n;
+    double variance = 0.0;
+    for (int i = 0; i < n; i++) {
+      final double diff = window[start + i] - mean;
+      variance += diff * diff;
+    }
+    variance /= n;
+    if (variance < eps) {
+      return 0.0;
+    }
+    double numerator = 0.0;
+    for (int i = 0; i < n - 2; i++) {
+      final double v1 = window[start + i] - mean;
+      final double v2 = window[start + i + 2] - mean;
+      numerator += v1 * v2;
+    }
+    numerator /= (n - 2);
+    return numerator / variance;
   }
 
   double _norm(List<double> values) {

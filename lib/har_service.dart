@@ -11,14 +11,19 @@ class HARService {
   static Interpreter? _interpreter;
   static bool _metadataLoaded = false;
 
-  static const int _inputSize = 50; // Number of samples required
-  static const int _numFeatures = 17;
+  static const int _inputSize = 25; // Number of samples required
+  static const int _numFeatures = 25;
   static const int _outputSize = 11;
-  static const int _smoothingWindow = 5;
+  static const int _medianKernelLarge = 5;
+  static const int _medianKernelSmall = 3;
+  static const int _probabilityWindow = 5;
   static const double _epsilon = 1e-8;
+  static const double _lowConfidenceThreshold = 0.4;
 
   static final List<List<double>> _featureBuffer = <List<double>>[];
-  static final List<int> _predictionHistory = <int>[];
+  static final List<int> _rawPredictionHistory = <int>[];
+  static final List<int> _confidenceAdjustedHistory = <int>[];
+  static final List<List<double>> _probabilityHistory = <List<double>>[];
 
   static List<String> _activityLabels = List<String>.from(_defaultLabelDisplay);
   static String? _latestPredictionText;
@@ -37,65 +42,75 @@ class HARService {
     'accelMag',
     'linAccMag',
     'jerkMag',
-    'accelVert',
-    'accelHorizMag',
+    'jerkVert',
+    'jerkHorizMag',
+    'jerk_rms',
+    'jerk_instability',
+    'vert_energy_ratio',
+    'horiz_energy_ratio',
+    'highfreq_ratio',
+    'gait_periodicity',
     'stride_variability',
     'movement_consistency',
-    'jerk_rms',
+    'vert_velocity_signed',
+    'vert_velocity_trend',
+    'lateral_balance',
   ];
 
   static const List<double> _featureMean = <double>[
-    -0.0207375381141901,
-    -0.633249044418335,
-    0.02610127627849579,
-    -0.02064252644777298,
-    -0.6332488059997559,
-    0.026249036192893982,
-    -9.50118264881894e-05,
-    -2.460145935856417e-07,
-    -0.00014776120951864868,
-    1.0214903354644775,
-    0.20727160573005676,
-    0.27486854791641235,
-    0.984337568283081,
-    0.12175355851650238,
-    0.08928065001964569,
-    -0.009514795616269112,
-    0.23995821177959442,
+    -0.021668165922164917,
+    -0.6572025418281555,
+    0.03427287936210632,
+    -0.02103836089372635,
+    -0.6578264236450195,
+    0.0361427366733551,
+    -0.0006298051448538899,
+    0.0006239209324121475,
+    -0.0018698560306802392,
+    1.0219208002090454,
+    0.24593454599380493,
+    0.29173874855041504,
+    -0.0002578217536211014,
+    0.1820693016052246,
+    0.3361179828643799,
+    0.16432751715183258,
+    0.9315782785415649,
+    0.06842168420553207,
+    16.487808227539062,
+    -0.10400755703449249,
+    0.18963348865509033,
+    0.9839140772819519,
+    19.41428565979004,
+    0.0008267218945547938,
+    121.81930541992188,
   ];
 
   static const List<double> _featureScale = <double>[
-    0.44066229462623596,
-    0.5206595659255981,
-    0.5126204490661621,
-    0.39387020468711853,
-    0.4231494665145874,
-    0.48281800746917725,
-    0.1884622573852539,
-    0.289221853017807,
-    0.16374623775482178,
-    0.2944871187210083,
-    0.3209651708602905,
-    0.46730488538742065,
-    0.328386127948761,
-    0.19642598927021027,
-    0.12184872478246689,
-    0.3156552314758301,
-    0.3424205183982849,
-  ];
-
-  static const List<double> _classThresholds = <double>[
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.48,
-    0.0,
-    0.0,
-    0.60,
-    0.0,
+    0.4349856376647949,
+    0.5218822956085205,
+    0.49425432085990906,
+    0.381322979927063,
+    0.4149784445762634,
+    0.4564850628376007,
+    0.2155025750398636,
+    0.3259219825267792,
+    0.19245800375938416,
+    0.3083796501159668,
+    0.35948166251182556,
+    0.47981226444244385,
+    0.42215633392333984,
+    0.3224376440048218,
+    0.44908982515335083,
+    0.21452125906944275,
+    0.17211775481700897,
+    0.1721177101135254,
+    1302.8140869140625,
+    0.3030170500278473,
+    0.24368108808994293,
+    0.024226132780313492,
+    2.092092990875244,
+    0.45464491844177246,
+    50129.30078125,
   ];
 
   static const List<String> _defaultLabelDisplay = <String>[
@@ -126,13 +141,18 @@ class HARService {
     'sittingStanding': 'Sitting / Standing',
   };
 
+  static const int _miscIndex = 6;
+  static const int _shuffleIndex = 9;
+  static const Set<int> _lowConfidenceClasses = <int>{_miscIndex, _shuffleIndex};
+  static int? _lastConfidenceAdjustedClass;
+
   static Future<bool> initialize() async {
     if (_interpreter != null) {
       return true;
     }
     try {
       await _loadMetadata();
-      _interpreter = await Interpreter.fromAsset('final_model_float16.tflite');
+      _interpreter = await Interpreter.fromAsset('model/har/final_model_quantized_fp16.tflite');
       print('HAR model loaded successfully');
       return true;
     } catch (e) {
@@ -147,7 +167,7 @@ class HARService {
     }
     try {
       final String jsonString =
-          await rootBundle.loadString('HAR_CNN_labels.json');
+          await rootBundle.loadString('model/har/HAR_CNN_labels.json');
       final dynamic decoded = jsonDecode(jsonString);
       if (decoded is List && decoded.length == _outputSize) {
         _activityLabels = decoded
@@ -192,7 +212,10 @@ class HARService {
 
   static void clearBuffer() {
     _featureBuffer.clear();
-    _predictionHistory.clear();
+    _rawPredictionHistory.clear();
+    _confidenceAdjustedHistory.clear();
+    _probabilityHistory.clear();
+    _lastConfidenceAdjustedClass = null;
     _latestPredictionText = null;
     _latestConfidence = 0.0;
   }
@@ -242,38 +265,39 @@ class HARService {
     }
 
     final List<double> probabilities = List<double>.from(output[0]);
-    int predictedClass = 0;
-    double predictedConf = probabilities[0];
+    final int rawClass = _argmax(probabilities);
+    final double rawConfidence = probabilities[rawClass];
 
-    for (int i = 1; i < probabilities.length; i++) {
-      if (probabilities[i] > predictedConf) {
-        predictedClass = i;
-        predictedConf = probabilities[i];
-      }
+    _appendIntWithLimit(_rawPredictionHistory, rawClass, _medianKernelLarge);
+    final int step1Class = _medianLabel(_rawPredictionHistory);
+
+    int step2Class = step1Class;
+    if (rawConfidence < _lowConfidenceThreshold &&
+        _lowConfidenceClasses.contains(step1Class) &&
+        _lastConfidenceAdjustedClass != null) {
+      step2Class = _lastConfidenceAdjustedClass!;
     }
+    _lastConfidenceAdjustedClass = step2Class;
 
-    int adjustedClass = predictedClass;
-    double adjustedConf = predictedConf;
+    _appendIntWithLimit(
+        _confidenceAdjustedHistory, step2Class, _medianKernelSmall);
+    final int step3Class = _medianLabel(_confidenceAdjustedHistory);
 
-    if (adjustedClass == 9 && adjustedConf < 0.60) {
-      adjustedClass = 7;
-      adjustedConf = probabilities[7];
+    _probabilityHistory.add(probabilities);
+    if (_probabilityHistory.length > _probabilityWindow) {
+      _probabilityHistory.removeAt(0);
     }
+    final List<double> smoothedProbabilities =
+        _averageProbabilities(_probabilityHistory);
+    final int softClass = _argmax(smoothedProbabilities);
 
-    if (adjustedConf < _classThresholds[adjustedClass]) {
-      adjustedClass = 6;
-      adjustedConf = probabilities[6];
-    }
+    final int finalClass =
+        softClass == _miscIndex ? softClass : step3Class;
 
-    _predictionHistory.add(adjustedClass);
-    if (_predictionHistory.length > _smoothingWindow) {
-      _predictionHistory.removeAt(0);
-    }
-
-    final int smoothedClass = _medianLabel(_predictionHistory);
-    _latestConfidence = probabilities[smoothedClass];
-    final String label =
-        smoothedClass < _activityLabels.length ? _activityLabels[smoothedClass] : 'Class $smoothedClass';
+    _latestConfidence = smoothedProbabilities[finalClass];
+    final String label = finalClass < _activityLabels.length
+        ? _activityLabels[finalClass]
+        : 'Class $finalClass';
     _latestPredictionText =
         '$label (${(_latestConfidence * 100).toStringAsFixed(1)}%)';
   }
@@ -281,5 +305,39 @@ class HARService {
   static int _medianLabel(List<int> history) {
     final List<int> sorted = List<int>.from(history)..sort();
     return sorted[sorted.length ~/ 2];
+  }
+
+  static void _appendIntWithLimit(List<int> history, int value, int limit) {
+    history.add(value);
+    if (history.length > limit) {
+      history.removeAt(0);
+    }
+  }
+
+  static int _argmax(List<double> values) {
+    int index = 0;
+    double maxValue = values[0];
+    for (int i = 1; i < values.length; i++) {
+      if (values[i] > maxValue) {
+        index = i;
+        maxValue = values[i];
+      }
+    }
+    return index;
+  }
+
+  static List<double> _averageProbabilities(List<List<double>> history) {
+    final List<double> accumulator =
+        List<double>.filled(_outputSize, 0.0, growable: false);
+    for (final List<double> row in history) {
+      for (int i = 0; i < accumulator.length; i++) {
+        accumulator[i] += row[i];
+      }
+    }
+    final double divisor = history.length.toDouble();
+    for (int i = 0; i < accumulator.length; i++) {
+      accumulator[i] /= divisor;
+    }
+    return accumulator;
   }
 }
