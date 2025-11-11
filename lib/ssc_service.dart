@@ -96,7 +96,7 @@ class SSCService {
     await _loadLabels();
     try {
       _interpreter = await Interpreter.fromAsset(
-        'model/ssc/final_model_quantized_fp16.tflite',
+        'model/ssc/final_model_quantized.tflite',
       );
     } catch (e) {
       print('Failed to load SSC model: $e');

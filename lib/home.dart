@@ -83,8 +83,8 @@ class MyHomePageState extends State<MyHomePage> {
       );
   final SscFeatureEngineer sscFeatureEngineer = SscFeatureEngineer();
   final PredictionCoordinator predictionCoordinator = PredictionCoordinator(
-    consecutiveThreshold: 3,
-    minConfidence: 0.5,
+    consecutiveThreshold: 1,
+    minConfidence: 0.1,
   );
 
   @override
