@@ -773,7 +773,9 @@ class SscFeatureEngineer {
   final List<double> _vertHistory = <double>[];
   final List<double> _diffHistory = <double>[];
   final List<double> _linAccHistory = <double>[];
+  final List<double> _linAccStdHistory = <double>[];
   final List<double> _accelMagHistory = <double>[];
+  final List<double> _fftEnergyHistory = <double>[];
   final List<int> _zeroCrossHistory = <int>[];
   final List<double> _breathingDropHistory = <double>[];
 
@@ -787,7 +789,9 @@ class SscFeatureEngineer {
     _vertHistory.clear();
     _diffHistory.clear();
     _linAccHistory.clear();
+    _linAccStdHistory.clear();
     _accelMagHistory.clear();
+    _fftEnergyHistory.clear();
     _zeroCrossHistory.clear();
     _breathingDropHistory.clear();
     _previousVertical = null;
@@ -812,6 +816,9 @@ class SscFeatureEngineer {
     final double breathingStability = _breathingStability();
     final double rhythmStability = _rhythmStability();
     final double burstDensity = _burstDensity(sample.jerkMag);
+    final double energyBurstRatio = _energyBurstRatio(sample.linAccMag);
+    final double breathingIntensityVar = _breathingIntensityVariance();
+    final double fftEnergy = _fftEnergy();
     final double coughEnergyRatio = _coughEnergyRatio();
     final double dominantRespFreq = _dominantRespFreq();
     final double spectralSharpness = _spectralSharpness();
@@ -823,18 +830,22 @@ class SscFeatureEngineer {
       'accelX': sample.accelX,
       'accelY': sample.accelY,
       'accelZ': sample.accelZ,
+      'accelMag': sample.accelMag,
       'linAccMag': sample.linAccMag,
       'jerkMag': sample.jerkMag,
       'jerk_rms': jerkRms,
-      'burst_density': burstDensity,
       'breathing_stability': breathingStability,
       'rhythm_stability': rhythmStability,
-      'cough_energy_ratio': coughEnergyRatio,
-      'dominant_resp_freq': dominantRespFreq,
-      'spectral_sharpness': spectralSharpness,
+      'burst_density': burstDensity,
+      'energy_burst_ratio': energyBurstRatio,
+      'breathing_intensity_var': breathingIntensityVar,
+      'fft_energy': fftEnergy,
       'zero_cross_rate': zeroCrossRate,
-      'short_energy_ratio': shortEnergyRatio,
+      'dominant_resp_freq': dominantRespFreq,
+      'cough_energy_ratio': coughEnergyRatio,
       'breathing_disruption': breathingDisruption,
+      'spectral_sharpness': spectralSharpness,
+      'short_energy_ratio': shortEnergyRatio,
     };
   }
 
@@ -1035,6 +1046,71 @@ class SscFeatureEngineer {
       return 0.0;
     }
     return (shortMean / longMean).clamp(0.0, 10.0);
+  }
+
+  double _energyBurstRatio(double linAccMag) {
+    final double localMean = _meanTail(_linAccHistory, _linLongWindow, 10);
+    if (localMean.abs() < _eps) {
+      return 0.0;
+    }
+    return (linAccMag / localMean).clamp(0.0, 10.0);
+  }
+
+  double _breathingIntensityVariance() {
+    final int count = min(_linLongWindow, _linAccHistory.length);
+    if (count < 5) {
+      _appendDouble(_linAccStdHistory, 0.0, _linLongWindow);
+      return 0.0;
+    }
+    final int start = _linAccHistory.length - count;
+    double mean = 0.0;
+    for (int i = start; i < _linAccHistory.length; i++) {
+      mean += _linAccHistory[i];
+    }
+    mean /= count;
+    double variance = 0.0;
+    for (int i = start; i < _linAccHistory.length; i++) {
+      final double diff = _linAccHistory[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= count;
+    final double std = sqrt(max(variance, 0.0));
+    _appendDouble(_linAccStdHistory, std, _linLongWindow);
+    double maxStd = 0.0;
+    for (final double value in _linAccStdHistory) {
+      if (value > maxStd) {
+        maxStd = value;
+      }
+    }
+    if (maxStd <= _eps) {
+      return 0.0;
+    }
+    return (std / maxStd).clamp(0.0, 1.0);
+  }
+
+  double _fftEnergy() {
+    final int count = min(_fftWindow, _accelMagHistory.length);
+    if (count < 16) {
+      _appendDouble(_fftEnergyHistory, 0.0, _fftWindow);
+      return 0.0;
+    }
+    final int start = _accelMagHistory.length - count;
+    double energy = 0.0;
+    for (int i = start; i < _accelMagHistory.length; i++) {
+      final double value = _accelMagHistory[i];
+      energy += value * value;
+    }
+    _appendDouble(_fftEnergyHistory, energy, _fftWindow);
+    double maxEnergy = 0.0;
+    for (final double value in _fftEnergyHistory) {
+      if (value > maxEnergy) {
+        maxEnergy = value;
+      }
+    }
+    if (maxEnergy <= _eps) {
+      return 0.0;
+    }
+    return (energy / maxEnergy).clamp(0.0, 1.0);
   }
 
   double _breathingDisruption(double stability) {
