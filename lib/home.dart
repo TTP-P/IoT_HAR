@@ -1216,12 +1216,14 @@ class PredictionCoordinator {
     required int harWindowSize,
     required SscPrediction? sscPrediction,
   }) {
+    final String harText =
+        _formatHarText(harDisplay, harBufferSize, harWindowSize);
     final bool harEligible =
         harLabel != null && _eligibleHarLabels.contains(harLabel);
 
     if (!harEligible) {
       reset();
-      return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+      return harText;
     }
 
     if (sscPrediction != null && sscPrediction.confidence >= minConfidence) {
@@ -1235,7 +1237,7 @@ class PredictionCoordinator {
       _candidateLabel = null;
       _candidateCount = 0;
       if (!_sscActive) {
-        return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+        return harText;
       }
     }
 
@@ -1251,14 +1253,15 @@ class PredictionCoordinator {
     if (_sscActive) {
       if (sscPrediction != null && sscPrediction.confidence >= minConfidence) {
         _activePrediction = sscPrediction;
-        return _formatSsc(_activePrediction!);
+        final String sscText = _formatSsc(_activePrediction!);
+        return '$sscText\n$harText';
       }
       _sscActive = false;
       _activePrediction = null;
-      return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+      return harText;
     }
 
-    return _formatHarText(harDisplay, harBufferSize, harWindowSize);
+    return harText;
   }
 
   String _formatHarText(String? harDisplay, int bufferSize, int window) {
