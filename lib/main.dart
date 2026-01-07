@@ -21,6 +21,7 @@ void main() async {
 
   subjectID = await asyncPrefs.getString('sid');
   print("subjectID:${subjectID}");
+  useCloudComputing = await asyncPrefs.getBool('useCloudComputing') ?? false;
 
   // get storage folder - must be accessible to the user for PDIoT
   storageFolder = await getDownloadsDirectory();

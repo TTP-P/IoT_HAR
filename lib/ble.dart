@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'utils.dart';
 import 'home.dart';
 import 'globals.dart';
+import 'cloud_client.dart';
 import 'har_service.dart';
 import 'ssc_service.dart';
 
@@ -170,6 +171,8 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
       String csv_str = "";
       int seqNumInPacket = 0;
       double x = 0, y = 0, z = 0;
+      final List<Map<String, Object?>> cloudSamples =
+          <Map<String, Object?>>[];
 
       for (int i = 8; i < bd.lengthInBytes; i += 6) {
         int b1 = bd.getInt8(i);
@@ -187,15 +190,22 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         // Modified 
         final featureResult = ui.featureEngineer.processSample(x, y, z);
 
-        final featureMap = featureResult.toFeatureMap();
-        HARService.addFeatureSample(
-          featureMap,
-          isStepBoundary: featureResult.isStepBoundary,
-        );
-
+        final Map<String, double> featureMap = featureResult.toFeatureMap();
         final Map<String, double> sscFeatureMap =
             ui.sscFeatureEngineer.process(featureResult);
-        SSCService.addFeatureSample(sscFeatureMap);
+        if (useCloudComputing) {
+          cloudSamples.add(<String, Object?>{
+            'har': featureMap,
+            'ssc': sscFeatureMap,
+            'is_step_boundary': featureResult.isStepBoundary,
+          });
+        } else {
+          HARService.addFeatureSample(
+            featureMap,
+            isStepBoundary: featureResult.isStepBoundary,
+          );
+          SSCService.addFeatureSample(sscFeatureMap);
+        }
 
         csv_str +=
             "${packet_received_ts.millisecondsSinceEpoch},$ts,$packetSeqNumber,$seqNumInPacket,$x,$y,$z,${featureResult.gravityX},${featureResult.gravityY},${featureResult.gravityZ},${featureResult.linAccX},${featureResult.linAccY},${featureResult.linAccZ},${featureResult.accelMag},${featureResult.linAccMag},${featureResult.jerkMag},${featureResult.accelVert},${featureResult.accelHorizMag},${featureResult.strideVariability},${featureResult.movementConsistency},${featureResult.jerkRms}\n";
@@ -204,9 +214,31 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         ui.recorded_samples++;
       }
 
-      final String? harPrediction = HARService.getLatestPrediction();
-      final String? harLabel = HARService.getLatestLabel();
-      final SscPrediction? sscPrediction = SSCService.getLatestPrediction();
+      CloudPrediction? cloudPrediction;
+      if (useCloudComputing) {
+        cloudPrediction = await requestCloudPrediction(cloudSamples);
+      }
+
+      final String? harPrediction = useCloudComputing
+          ? cloudPrediction?.harDisplay
+          : HARService.getLatestPrediction();
+      final String? harLabel = useCloudComputing
+          ? cloudPrediction?.harLabel
+          : HARService.getLatestLabel();
+      SscPrediction? sscPrediction;
+      if (useCloudComputing) {
+        if (cloudPrediction?.sscLabel != null) {
+          sscPrediction = SscPrediction(
+            label: cloudPrediction!.sscLabel!,
+            confidence: cloudPrediction.sscConfidence ?? 0.0,
+          );
+        }
+      } else {
+        sscPrediction = SSCService.getLatestPrediction();
+      }
+      final int harBufferSize = useCloudComputing
+          ? (cloudPrediction?.harBufferSize ?? 0)
+          : HARService.getBufferSize();
 
       // Update the UI to show the latest data (called once per packet)
       ui.updateUI(
@@ -219,7 +251,7 @@ Future<void> scanForRespeck(MyHomePageState ui) async {
         harPrediction: harPrediction,
         harLabel: harLabel,
         sscPrediction: sscPrediction,
-        harBufferSize: HARService.getBufferSize(),
+        harBufferSize: harBufferSize,
       );
 
       // update elapsed time counter if recording

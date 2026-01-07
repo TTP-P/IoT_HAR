@@ -6,6 +6,8 @@ final SharedPreferencesAsync asyncPrefs = SharedPreferencesAsync();
 String? respeckUUID;
 String? subjectID;
 String? fwString;
+bool useCloudComputing = false;
+String cloudServerBaseUrl = 'http://192.168.43.1:5000';
 
 // The folder and CSV file where sensor data is written
 late Directory? storageFolder;

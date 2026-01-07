@@ -4,6 +4,7 @@ import 'settings.dart';
 import 'utils.dart';
 import 'ble.dart';
 import 'globals.dart';
+import 'cloud_client.dart';
 import 'dart:io';
 import 'dart:math';
 import 'har_service.dart';
@@ -67,6 +68,10 @@ class MyHomePageState extends State<MyHomePage> {
     'Laughing'
   ];
   String selected_signal = "Normal";
+  final List<String> computingModes = const <String>[
+    'Local computing',
+    'Cloud computing',
+  ];
 
   bool recording = false;
   bool received_packet = false;
@@ -146,6 +151,22 @@ class MyHomePageState extends State<MyHomePage> {
     });
   }
 
+  Future<void> _changeComputingMode(String mode) async {
+    final bool nextUseCloud = mode == 'Cloud computing';
+    HARService.clearBuffer();
+    SSCService.clearBuffer();
+    predictionCoordinator.reset();
+    featureEngineer.reset();
+    sscFeatureEngineer.reset();
+    if (nextUseCloud) {
+      await resetCloudState();
+    }
+    setState(() {
+      useCloudComputing = nextUseCloud;
+    });
+    await asyncPrefs.setBool('useCloudComputing', nextUseCloud);
+  }
+
   // When leaving the home screen, the HAR interpreter and buffer are cleared.
   // Prevents memory leaks or duplicate models being loaded if the user navigates away.
   @override
@@ -217,6 +238,23 @@ class MyHomePageState extends State<MyHomePage> {
             ),
             Text(
               batt_level,
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Computing mode',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            DropdownButton<String>(
+              value: useCloudComputing ? 'Cloud computing' : 'Local computing',
+              items: computingModes.map((String mode) {
+                return DropdownMenuItem(value: mode, child: Text(mode));
+              }).toList(),
+              onChanged: (String? newValue) async {
+                if (newValue == null) {
+                  return;
+                }
+                await _changeComputingMode(newValue);
+              },
             ),
             const SizedBox(height: 20),
             const Text(
